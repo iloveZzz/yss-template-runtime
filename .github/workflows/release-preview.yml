@@ -218,35 +218,120 @@ jobs:
         run: |
           set -eu
           tag="${RELEASE_TAG}"
-          lookup_error="$(mktemp)"
-          if release_state=$(gh release view "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json isDraft,isPrerelease \
-            --jq 'if .isDraft and .isPrerelease then "preview" else "non-preview" end' \
-            2>"${lookup_error}"); then
-            if [ "${release_state}" != "preview" ]; then
-              echo "existing release ${tag} is not a draft prerelease; refusing to upload preview assets" >&2
-              rm -f "${lookup_error}"
+          transient_error() {
+            grep -qiE '5(02|03|04)|temporarily|currently unavailable' "$1"
+          }
+
+          lookup_release() {
+            local attempt
+            local error_file
+            error_file="$(mktemp)"
+            for attempt in 1 2 3 4 5; do
+              : >"${error_file}"
+              if release_state=$(gh release view "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --json isDraft,isPrerelease \
+                --jq 'if .isDraft and .isPrerelease then "preview" else "non-preview" end' \
+                2>"${error_file}"); then
+                rm -f "${error_file}"
+                return 0
+              fi
+              if grep -qiE 'not found|could not find|HTTP 404' "${error_file}"; then
+                rm -f "${error_file}"
+                return 2
+              fi
+              if ! transient_error "${error_file}"; then
+                cat "${error_file}" >&2
+                rm -f "${error_file}"
+                return 1
+              fi
+              if [ "${attempt}" -lt 5 ]; then
+                sleep 5
+              fi
+            done
+            cat "${error_file}" >&2
+            rm -f "${error_file}"
+            return 1
+          }
+
+          lookup_result=0
+          lookup_release || lookup_result=$?
+          if [ "${lookup_result}" -eq 1 ]; then
+            exit 1
+          fi
+          if [ "${lookup_result}" -eq 0 ] && [ "${release_state}" != "preview" ]; then
+            echo "existing release ${tag} is not a draft prerelease; refusing to upload preview assets" >&2
+            exit 1
+          fi
+
+          if [ "${lookup_result}" -eq 2 ]; then
+            create_error="$(mktemp)"
+            created=false
+            for attempt in 1 2 3 4 5; do
+              : >"${create_error}"
+              if gh release create "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --draft \
+                --prerelease \
+                --verify-tag \
+                --title "create-yss-spec ${tag} - macOS/Linux preview" \
+                --notes-file .github/release-notes/v3.0.0-rc.1.md \
+                2>"${create_error}"; then
+                created=true
+                break
+              fi
+              if ! transient_error "${create_error}"; then
+                cat "${create_error}" >&2
+                rm -f "${create_error}"
+                exit 1
+              fi
+              post_create_lookup=0
+              lookup_release || post_create_lookup=$?
+              if [ "${post_create_lookup}" -eq 0 ]; then
+                if [ "${release_state}" != "preview" ]; then
+                  echo "existing release ${tag} is not a draft prerelease; refusing to upload preview assets" >&2
+                  rm -f "${create_error}"
+                  exit 1
+                fi
+                created=true
+                break
+              fi
+              if [ "${post_create_lookup}" -eq 1 ]; then
+                rm -f "${create_error}"
+                exit 1
+              fi
+              if [ "${attempt}" -lt 5 ]; then
+                sleep 5
+              fi
+            done
+            if [ "${created}" != true ]; then
+              cat "${create_error}" >&2
+              rm -f "${create_error}"
               exit 1
             fi
-            rm -f "${lookup_error}"
-            gh release upload "${tag}" \
+            rm -f "${create_error}"
+          fi
+
+          upload_error="$(mktemp)"
+          for attempt in 1 2 3 4 5; do
+            : >"${upload_error}"
+            if gh release upload "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
               --clobber \
-              dist/*
-          else
-            if ! grep -qiE 'not found|could not find|HTTP 404' "${lookup_error}"; then
-              cat "${lookup_error}" >&2
-              rm -f "${lookup_error}"
+              dist/* \
+              2>"${upload_error}"; then
+              rm -f "${upload_error}"
+              exit 0
+            fi
+            if ! transient_error "${upload_error}"; then
+              cat "${upload_error}" >&2
+              rm -f "${upload_error}"
               exit 1
             fi
-            rm -f "${lookup_error}"
-            gh release create "${tag}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --draft \
-              --prerelease \
-              --verify-tag \
-              --title "create-yss-spec ${tag} - macOS/Linux preview" \
-              --notes-file .github/release-notes/v3.0.0-rc.1.md \
-              dist/*
-          fi
+            if [ "${attempt}" -lt 5 ]; then
+              sleep 5
+            fi
+          done
+          cat "${upload_error}" >&2
+          rm -f "${upload_error}"
+          exit 1
