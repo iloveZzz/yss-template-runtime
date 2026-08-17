@@ -1,0 +1,12 @@
+[package]
+name = "create-yss-spec"
+version = "3.0.0-alpha.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native Rust runtime for create-yss-spec and YSS template instances"
+
+[[bin]]
+name = "create-yss-spec"
+path = "src/main.rs"
+
+[dependencies]

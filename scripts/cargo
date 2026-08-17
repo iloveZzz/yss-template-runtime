@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+runtime_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+runtime_cargo_home="$runtime_root/.tooling/cargo"
+runtime_rustup_home="$runtime_root/.tooling/rustup"
+runtime_cargo="$runtime_cargo_home/bin/cargo"
+
+if [ ! -x "$runtime_cargo" ]; then
+  echo "缺少隔离 Rust toolchain；先执行 scripts/bootstrap-rust-toolchain.sh" >&2
+  exit 2
+fi
+
+export CARGO_HOME="$runtime_cargo_home"
+export RUSTUP_HOME="$runtime_rustup_home"
+exec "$runtime_cargo" "$@"
