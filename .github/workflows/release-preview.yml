@@ -1,0 +1,136 @@
+name: Release preview
+
+"on":
+  push:
+    tags:
+      - "v3.0.0-rc.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Install musl linker
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y musl-tools
+
+      - name: Configure musl linker
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run target tests
+        run: cargo test --locked --target "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package preview asset
+        env:
+          TARGET: ${{ matrix.target }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          mkdir -p dist/stage
+          cp "target/${TARGET}/release/create-yss-spec" dist/stage/create-yss-spec
+          archive="create-yss-spec-${RELEASE_TAG}-${TARGET}.tar.gz"
+          tar -C dist/stage -czf "dist/${archive}" create-yss-spec
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${archive}" > "dist/${archive}.sha256"
+          else
+            shasum -a 256 "dist/${archive}" > "dist/${archive}.sha256"
+          fi
+          {
+            printf 'tag=%s\n' "${RELEASE_TAG}"
+            printf 'commit=%s\n' "${GITHUB_SHA}"
+            printf 'target=%s\n' "${TARGET}"
+            printf 'preview=true\n'
+            printf 'signed=false\n'
+          } > "dist/${archive}.build-info.txt"
+          rm -rf dist/stage
+
+      - name: Upload preview asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Create GitHub draft Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Download preview assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums and asset set
+        run: |
+          set -eu
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 2
+          test "$(find dist -maxdepth 1 -name '*.sha256' | wc -l | tr -d ' ')" -eq 2
+          sha256sum -c dist/*.sha256
+
+      - name: Create or update draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          if release_state=$(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isPrerelease \
+            --jq 'if .isDraft and .isPrerelease then "preview" else "non-preview" end' \
+            2>/dev/null); then
+            if [ "${release_state}" != "preview" ]; then
+              echo "existing release ${tag} is not a draft prerelease; refusing to upload preview assets" >&2
+              exit 1
+            fi
+            gh release upload "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              dist/*
+          else
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --prerelease \
+              --verify-tag \
+              --title "create-yss-spec ${tag} - macOS/Linux preview" \
+              --notes-file .github/release-notes/v3.0.0-rc.1.md \
+              dist/*
+          fi

@@ -1,6 +1,6 @@
 [package]
 name = "create-yss-spec"
-version = "3.0.0-alpha.0"
+version = "3.0.0-rc.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Native Rust runtime for create-yss-spec and YSS template instances"

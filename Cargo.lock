@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "create-yss-spec"
-version = "3.0.0-alpha.0"
+version = "3.0.0-rc.1"
 dependencies = [
  "serde_json",
  "sha2",
