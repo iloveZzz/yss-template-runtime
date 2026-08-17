@@ -4,17 +4,35 @@ name: Release preview
   push:
     tags:
       - "v3.0.0-rc.1"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to build"
+        required: true
+        default: "v3.0.0-rc.1"
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  validate-release:
+    name: Validate release target
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: test "${RELEASE_TAG}" = "v3.0.0-rc.1"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: validate-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -28,6 +46,8 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - name: Install musl linker
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -43,22 +63,34 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-      - name: Run target tests
-        run: cargo test --locked --target "${{ matrix.target }}"
+      - name: Run tests and compile target tests
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          if [ "${TARGET}" = "x86_64-unknown-linux-musl" ]; then
+            cargo test --locked
+            cargo test --locked --target "${TARGET}" --no-run
+          else
+            cargo test --locked --target "${TARGET}"
+          fi
 
       - name: Build release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
+      - name: Smoke test release binary
+        run: target/${{ matrix.target }}/release/create-yss-spec --help >/dev/null
+
       - name: Package preview asset
         env:
           TARGET: ${{ matrix.target }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           set -eu
           mkdir -p dist/stage
           cp "target/${TARGET}/release/create-yss-spec" dist/stage/create-yss-spec
           archive="create-yss-spec-${RELEASE_TAG}-${TARGET}.tar.gz"
-          tar -C dist/stage -czf "dist/${archive}" create-yss-spec
+          tar -czf "dist/${archive}" -C dist/stage create-yss-spec
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "dist/${archive}" > "dist/${archive}.sha256"
           else
@@ -66,7 +98,7 @@ jobs:
           fi
           {
             printf 'tag=%s\n' "${RELEASE_TAG}"
-            printf 'commit=%s\n' "${GITHUB_SHA}"
+            printf 'commit=%s\n' "$(git rev-parse HEAD)"
             printf 'target=%s\n' "${TARGET}"
             printf 'preview=true\n'
             printf 'signed=false\n'
@@ -82,7 +114,7 @@ jobs:
 
   draft-release:
     name: Create GitHub draft Release
-    needs: build
+    needs: [validate-release, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -91,6 +123,8 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - name: Download preview assets
         uses: actions/download-artifact@v4
@@ -99,32 +133,57 @@ jobs:
           merge-multiple: true
 
       - name: Verify checksums and asset set
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           set -eu
-          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 2
-          test "$(find dist -maxdepth 1 -name '*.sha256' | wc -l | tr -d ' ')" -eq 2
+          targets="aarch64-apple-darwin x86_64-unknown-linux-musl"
+          test "$(find dist -mindepth 1 -maxdepth 1 ! -type f | wc -l | tr -d ' ')" -eq 0
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 6
+          for target in ${targets}; do
+            archive="create-yss-spec-${RELEASE_TAG}-${target}.tar.gz"
+            checksum="${archive}.sha256"
+            build_info="${archive}.build-info.txt"
+            test -f "dist/${archive}"
+            test -f "dist/${checksum}"
+            test -f "dist/${build_info}"
+            grep -Fx "tag=${RELEASE_TAG}" "dist/${build_info}"
+            grep -Fx "target=${target}" "dist/${build_info}"
+            grep -Fx "preview=true" "dist/${build_info}"
+            grep -Fx "signed=false" "dist/${build_info}"
+          done
           sha256sum -c dist/*.sha256
 
       - name: Create or update draft Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           set -eu
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
+          lookup_error="$(mktemp)"
           if release_state=$(gh release view "${tag}" \
             --repo "${GITHUB_REPOSITORY}" \
             --json isDraft,isPrerelease \
             --jq 'if .isDraft and .isPrerelease then "preview" else "non-preview" end' \
-            2>/dev/null); then
+            2>"${lookup_error}"); then
             if [ "${release_state}" != "preview" ]; then
               echo "existing release ${tag} is not a draft prerelease; refusing to upload preview assets" >&2
+              rm -f "${lookup_error}"
               exit 1
             fi
+            rm -f "${lookup_error}"
             gh release upload "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
               --clobber \
               dist/*
           else
+            if ! grep -qiE 'not found|could not find|HTTP 404' "${lookup_error}"; then
+              cat "${lookup_error}" >&2
+              rm -f "${lookup_error}"
+              exit 1
+            fi
+            rm -f "${lookup_error}"
             gh release create "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
               --draft \
