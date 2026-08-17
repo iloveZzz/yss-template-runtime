@@ -75,6 +75,22 @@ jobs:
             cargo test --locked --target "${TARGET}"
           fi
 
+      - name: Verify Linux target runtime
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          uname -a
+          uname -m
+          rustc --version --verbose
+          rustup show active-toolchain
+          musl-gcc --version | head -1
+          cargo build --locked --target "${TARGET}"
+          file "target/${TARGET}/debug/create-yss-spec"
+          readelf -h "target/${TARGET}/debug/create-yss-spec"
+          target/${TARGET}/debug/create-yss-spec --help >/dev/null
+
       - name: Build release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
