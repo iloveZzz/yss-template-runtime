@@ -88,6 +88,21 @@ jobs:
           rustc --version --verbose
           rustup show active-toolchain
           musl-gcc --version | head -1
+          diagnostic_dir="${RUNNER_TEMP}/musl-runtime-diagnostics"
+          mkdir -p "${diagnostic_dir}"
+          printf '%s\n' 'fn main() { println!("hello"); }' > "${diagnostic_dir}/hello.rs"
+          printf '%s\n' 'fn main() { let _args: Vec<String> = std::env::args().collect(); println!("args-ok"); }' > "${diagnostic_dir}/args.rs"
+          printf '%s\n' 'use std::process::ExitCode; fn main() -> ExitCode { ExitCode::SUCCESS }' > "${diagnostic_dir}/exit.rs"
+          for name in hello args exit; do
+            rustc --target "${TARGET}" \
+              -C linker=musl-gcc \
+              -C target-feature=+crt-static \
+              -C link-arg=-static \
+              "${diagnostic_dir}/${name}.rs" \
+              -o "${diagnostic_dir}/${name}"
+            file "${diagnostic_dir}/${name}"
+            "${diagnostic_dir}/${name}"
+          done
           cargo build --locked --target "${TARGET}"
           binary="target/${TARGET}/debug/create-yss-spec"
           file "${binary}"
