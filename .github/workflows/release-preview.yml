@@ -70,7 +70,8 @@ jobs:
           set -eu
           if [ "${TARGET}" = "x86_64-unknown-linux-musl" ]; then
             cargo test --locked
-            cargo test --locked --target "${TARGET}" --no-run
+            RUSTFLAGS="-C target-feature=+crt-static" \
+              cargo test --locked --target "${TARGET}" --no-run
           else
             cargo test --locked --target "${TARGET}"
           fi
@@ -86,15 +87,41 @@ jobs:
           rustc --version --verbose
           rustup show active-toolchain
           musl-gcc --version | head -1
-          cargo build --locked --target "${TARGET}"
-          file "target/${TARGET}/debug/create-yss-spec"
-          readelf -h "target/${TARGET}/debug/create-yss-spec"
-          target/${TARGET}/debug/create-yss-spec --help >/dev/null
+          RUSTFLAGS="-C target-feature=+crt-static" \
+            cargo build --locked --target "${TARGET}"
+          binary="target/${TARGET}/debug/create-yss-spec"
+          file "${binary}"
+          readelf -h "${binary}"
+          if readelf -l "${binary}" | grep -q 'INTERP'; then
+            echo "expected a statically linked musl debug binary" >&2
+            exit 1
+          fi
+          "${binary}" --help >/dev/null
 
-      - name: Build release binary
+      - name: Build Linux musl release binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Build macOS release binary
+        if: matrix.target == 'aarch64-apple-darwin'
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
       - name: Smoke test release binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -eu
+          binary="target/${{ matrix.target }}/release/create-yss-spec"
+          file "${binary}"
+          if readelf -l "${binary}" | grep -q 'INTERP'; then
+            echo "expected a statically linked musl release binary" >&2
+            exit 1
+          fi
+          "${binary}" --help >/dev/null
+
+      - name: Smoke test macOS release binary
+        if: matrix.target == 'aarch64-apple-darwin'
         run: target/${{ matrix.target }}/release/create-yss-spec --help >/dev/null
 
       - name: Package preview asset
